@@ -224,12 +224,29 @@ public enum ContinuityInvariants {
         }
     }
 
+    /// Validates a complete session log. Use `validate(_:windowed:)` for a
+    /// journal that has dropped its oldest entries.
     public static func validate(_ events: [PostureEvent]) -> [Violation] {
+        validate(events, windowed: false)
+    }
+
+    /// - Parameter windowed: the log is a suffix of the real session (the
+    ///   journal dropped its front). The checker then cannot know whether a
+    ///   settle's `open`, a capture's `open`, or a restore's `plan` fell off
+    ///   the front, so it withholds those three judgements until it has seen
+    ///   enough of the window to make them: the first transition it observes
+    ///   opening resets the "unknown prefix" state, and a restore is only
+    ///   flagged plan-less when its generation is newer than every plan the
+    ///   window contains. Ordering violations (supersession, duplicates,
+    ///   nested opens) are still reported — they need no dropped context.
+    public static func validate(_ events: [PostureEvent], windowed: Bool) -> [Violation] {
         var violations: [Violation] = []
         var openGeneration: Generation?
         var lastSettled: Generation?
         var planned: Set<PlanKey> = []
         var applied: Set<PlanKey> = []
+        var prefixUnknown = windowed
+        var oldestPlannedGeneration: Generation?
 
         for event in events {
             switch event {
@@ -239,26 +256,37 @@ public enum ContinuityInvariants {
             case .transitionOpened(let generation, _, _, _):
                 if openGeneration != nil { violations.append(.nestedTransitionOpened(generation)) }
                 openGeneration = generation
+                prefixUnknown = false
             case .transitionContinued:
                 break
             case .captureAccepted(let generation, let flow):
-                if openGeneration != generation {
+                if openGeneration != generation && !(prefixUnknown && openGeneration == nil) {
                     violations.append(.captureOutsideTransition(generation, flow: flow))
                 }
             case .transitionReverted(let generation, _, _):
-                if openGeneration == nil { violations.append(.settleWithoutOpen(generation)) }
+                if openGeneration == nil && !prefixUnknown { violations.append(.settleWithoutOpen(generation)) }
                 openGeneration = nil
+                prefixUnknown = false
             case .transitionSettled(let generation, _, _, _):
-                if openGeneration == nil { violations.append(.settleWithoutOpen(generation)) }
+                if openGeneration == nil && !prefixUnknown { violations.append(.settleWithoutOpen(generation)) }
                 openGeneration = nil
+                prefixUnknown = false
                 lastSettled = generation
             case .implicitTransition(let generation, _, _, _):
                 lastSettled = generation
             case .restorePlanned(let generation, let flow, _):
                 planned.insert(PlanKey(generation: generation, flow: flow))
+                if oldestPlannedGeneration.map({ generation < $0 }) ?? true {
+                    oldestPlannedGeneration = generation
+                }
             case .restoreApplied(let generation, let flow):
                 let key = PlanKey(generation: generation, flow: flow)
-                if !planned.contains(key) {
+                // In a window, a plan for a generation no newer than the oldest
+                // plan we can see may have been dropped; only newer ones are
+                // provably missing.
+                let planCouldHaveDropped = windowed
+                    && (oldestPlannedGeneration.map { generation <= $0 } ?? true)
+                if !planned.contains(key) && !planCouldHaveDropped {
                     violations.append(.restoreWithoutPlan(generation, flow: flow))
                 }
                 if applied.contains(key) {

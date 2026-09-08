@@ -84,9 +84,12 @@ public final class PostureContinuitySimulation: ObservableObject {
         guard !isBusy else { return }
         isBusy = true
         defer { isBusy = false }
+        // Clamp before multiplying: a caller-supplied UInt64 times 1e6 can
+        // overflow, and a demo pause longer than ten seconds is a bug anyway.
+        let pause = min(pauseMillis, 10_000)
         await ingest(PostureKeyword.transitioning.observation(at: tick(120)))
-        try? await Task.sleep(nanoseconds: pauseMillis * 1_000_000)
-        await ingest(keyword.observation(at: tick(Int64(clamping: pauseMillis))))
+        try? await Task.sleep(nanoseconds: pause * 1_000_000)
+        await ingest(keyword.observation(at: tick(Int64(clamping: pause))))
     }
 
     /// Fold, fold, unfold inside one transition. The coordinator should

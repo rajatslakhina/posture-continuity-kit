@@ -129,11 +129,6 @@ public actor ContinuityCoordinator {
         var storms: Int
     }
 
-    private struct PlanKey: Hashable {
-        var generation: Generation
-        var flow: FlowID
-    }
-
     public let configuration: Configuration
 
     private var flows: [FlowID: FlowRecord] = [:]
@@ -142,7 +137,11 @@ public actor ContinuityCoordinator {
     private var lastIssued = Generation(0)
     private var lastSettledGeneration: Generation?
     private var outstandingPlans: [FlowID: RestorePlan] = [:]
-    private var appliedPlans: Set<PlanKey> = []
+    /// The generation each flow most recently applied. One entry per flow,
+    /// never more: the supersession guard already refuses anything older than
+    /// the last settled generation, so duplicate detection only needs the
+    /// latest applied generation, not a history of every (generation, flow).
+    private var lastAppliedGeneration: [FlowID: Generation] = [:]
     private var journal: PostureJournal
 
     public init(configuration: Configuration = Configuration()) {
@@ -164,6 +163,7 @@ public actor ContinuityCoordinator {
     public func unregister(_ flow: FlowID) {
         flows[flow] = nil
         outstandingPlans[flow] = nil
+        lastAppliedGeneration[flow] = nil
         open?.captures[flow] = nil
     }
 
@@ -401,12 +401,11 @@ public actor ContinuityCoordinator {
             journal.append(.restoreRejected(generation, flow: flow, reason: .noPlan))
             return .rejected(.noPlan)
         }
-        let key = PlanKey(generation: generation, flow: flow)
-        guard !appliedPlans.contains(key) else {
+        guard lastAppliedGeneration[flow] != generation else {
             journal.append(.restoreRejected(generation, flow: flow, reason: .duplicate))
             return .rejected(.duplicate)
         }
-        appliedPlans.insert(key)
+        lastAppliedGeneration[flow] = generation
         journal.append(.restoreApplied(generation, flow: flow))
         return .applied
     }
@@ -431,7 +430,10 @@ public actor ContinuityCoordinator {
 
     public func journalSnapshot() -> PostureJournal { journal }
     public func report() -> ContinuityReport { journal.report() }
+    /// Validates the journal. Once the bounded journal has dropped its oldest
+    /// entries the log is a window, not a session, so the checker is told so
+    /// and does not report the missing prefix as violations.
     public func violations() -> [ContinuityInvariants.Violation] {
-        ContinuityInvariants.validate(journal.events)
+        ContinuityInvariants.validate(journal.events, windowed: journal.droppedCount > 0)
     }
 }

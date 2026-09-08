@@ -127,6 +127,63 @@ final class InvariantTests: XCTestCase {
             [.restoreAfterSupersession(applied: Generation(1), currentSettled: Generation(2), flow: Fixtures.checkout)])
     }
 
+    /// A journal that dropped its front: the settle whose open fell off, the
+    /// capture whose open fell off and the restore whose plan fell off are
+    /// not violations — but everything after the first observed open is
+    /// judged normally, so a real bug in the window is still caught.
+    func testWindowedLogSuppressesDroppedPrefixButNotRealViolations() {
+        let window: [PostureEvent] = [
+            .captureAccepted(g1, flow: flow),                                // open dropped
+            .transitionSettled(g1, posture: Fixtures.expanded, at: 400, durationMillis: 300),
+            .restorePlanned(g1, flow: Fixtures.search, degradations: []),    // this flow's plan survived
+            .restoreApplied(g1, flow: flow),                                  // this flow's plan dropped
+            .transitionOpened(g2, from: Fixtures.expanded, toward: Fixtures.moving, at: 500),
+            .transitionSettled(g2, posture: Fixtures.compact, at: 800, durationMillis: 300),
+            .restorePlanned(g2, flow: flow, degradations: []),
+            .restoreApplied(g2, flow: flow)
+        ]
+        XCTAssertEqual(ContinuityInvariants.validate(window, windowed: true), [])
+        XCTAssertEqual(
+            ContinuityInvariants.validate(window, windowed: false).count, 3,
+            "the same log read as a complete session is broken three ways")
+
+        // Negative control inside the window: after g2 opened, a settle for a
+        // generation nobody opened, a restore for a generation newer than any
+        // plan, and a superseded restore must all still be reported.
+        var broken = window
+        broken.append(.transitionSettled(Generation(3), posture: Fixtures.expanded, at: 900, durationMillis: 0))
+        broken.append(.restoreApplied(Generation(4), flow: flow))
+        broken.append(.restoreApplied(g1, flow: Fixtures.search))
+        XCTAssertEqual(
+            ContinuityInvariants.validate(broken, windowed: true),
+            [
+                .settleWithoutOpen(Generation(3)),
+                .restoreWithoutPlan(Generation(4), flow: flow),
+                .restoreAfterSupersession(applied: g1, currentSettled: Generation(3), flow: Fixtures.search)
+            ])
+    }
+
+    func testCoordinatorViolationsStayEmptyAfterTheJournalWraps() async {
+        let coordinator = ContinuityCoordinator(configuration: .init(journalCapacity: 16))
+        await coordinator.register(Fixtures.checkoutDescriptor)
+        await coordinator.ingest(PostureKeyword.compact.observation(at: 0))
+        await coordinator.checkpoint(Fixtures.checkoutSnapshot())
+        for i in 0..<60 {
+            let base = Int64(i) * 100
+            await coordinator.ingest(PostureKeyword.transitioning.observation(at: base + 10))
+            await coordinator.capture(Fixtures.checkoutSnapshot(), generation: Generation(UInt64(i + 1)))
+            await coordinator.ingest((i % 2 == 0 ? PostureKeyword.expanded : .compact).observation(at: base + 50))
+            await coordinator.acknowledgeRestore(Fixtures.checkout, generation: Generation(UInt64(i + 1)))
+        }
+        let journal = await coordinator.journalSnapshot()
+        XCTAssertGreaterThan(journal.droppedCount, 0, "the window must actually have wrapped for this test to mean anything")
+        let violations = await coordinator.violations()
+        XCTAssertEqual(violations, [])
+        // The un-windowed read of the same events is what the naive check
+        // would have reported: false positives from the missing prefix.
+        XCTAssertFalse(ContinuityInvariants.validate(journal.events, windowed: false).isEmpty)
+    }
+
     func testViolationDescriptionsAreReadable() {
         let violation = ContinuityInvariants.Violation.restoreAfterSupersession(applied: g1, currentSettled: g2, flow: flow)
         XCTAssertEqual(violation.description, "restore g1 applied for checkout after g2 settled")
@@ -205,7 +262,7 @@ final class ConcurrencyTests: XCTestCase {
                 (i % 2 == 0 ? PostureKeyword.expanded : PostureKeyword.compact).observation(at: base + 50)
             ]
         }
-        async let driving: [IngestOutcome] = coordinator.drive(ReplayPostureReader(script))
+        async let driving: Void = coordinator.drive(ReplayPostureReader(script))
         let verdicts = await withTaskGroup(of: CheckpointVerdict.self, returning: [CheckpointVerdict].self) { group in
             for i in 0..<200 {
                 var snapshot = Fixtures.checkoutSnapshot()
@@ -216,7 +273,7 @@ final class ConcurrencyTests: XCTestCase {
             for await verdict in group { collected.append(verdict) }
             return collected
         }
-        _ = await driving
+        await driving
 
         let accepted = verdicts.filter { $0 == .accepted }.count
         let refused = verdicts.filter { $0 == .rejected(.transitionInProgress) }.count

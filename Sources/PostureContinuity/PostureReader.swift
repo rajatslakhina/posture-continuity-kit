@@ -159,6 +159,15 @@ public struct ScriptedPostureReader: PostureReader {
         self.paced = paced
     }
 
+    /// Millisecond gaps come from user-supplied scripts and can be anything up
+    /// to `Int64.max`; `UInt64(delta) * 1_000_000` would trap above ~1.8e13.
+    /// Saturate instead: a sleep that long is indistinguishable from forever.
+    static func nanoseconds(forMillis millis: Int64) -> UInt64 {
+        let clamped = UInt64(max(0, millis))
+        let (product, overflow) = clamped.multipliedReportingOverflow(by: 1_000_000)
+        return overflow ? UInt64.max : product
+    }
+
     public func observations() -> AsyncStream<PostureObservation> {
         let steps = script.observations
         let paced = self.paced
@@ -169,7 +178,7 @@ public struct ScriptedPostureReader: PostureReader {
                     if paced {
                         let delta = max(0, observation.timestampMillis &- previous)
                         if delta > 0 {
-                            try? await Task.sleep(nanoseconds: UInt64(delta) * 1_000_000)
+                            try? await Task.sleep(nanoseconds: Self.nanoseconds(forMillis: delta))
                         }
                         previous = observation.timestampMillis
                     }
@@ -186,13 +195,23 @@ public struct ScriptedPostureReader: PostureReader {
 // MARK: - Driving
 
 extension ContinuityCoordinator {
-    /// Consumes a reader to completion, ingesting every observation. The
-    /// `for await` here is the one suspension point in the coordinator's
-    /// public surface, and it is safe: `ingest` is itself synchronous, so
-    /// each observation is applied atomically and any call that interleaves
-    /// between two observations sees a consistent state.
-    @discardableResult
-    public func drive(_ reader: some PostureReader) async -> [IngestOutcome] {
+    /// Consumes a reader until its stream finishes, ingesting every
+    /// observation. Holds no per-observation state, so it is safe to point at
+    /// a live system reader that never finishes. The `for await` here is the
+    /// one suspension point in the coordinator's public surface, and it is
+    /// safe: `ingest` is itself synchronous, so each observation is applied
+    /// atomically and any call that interleaves between two observations sees
+    /// a consistent state.
+    public func drive(_ reader: some PostureReader) async {
+        for await observation in reader.observations() {
+            ingest(observation)
+        }
+    }
+
+    /// Like `drive`, but returns every outcome. For **finite** readers only —
+    /// replayed sessions and scripts — because it retains one outcome per
+    /// observation until the stream ends. Never point it at a live reader.
+    public func driveCollecting(_ reader: some PostureReader) async -> [IngestOutcome] {
         var outcomes: [IngestOutcome] = []
         for await observation in reader.observations() {
             outcomes.append(ingest(observation))

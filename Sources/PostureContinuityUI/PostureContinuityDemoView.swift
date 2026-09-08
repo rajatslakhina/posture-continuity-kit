@@ -7,9 +7,14 @@ import PostureContinuity
 /// at the top, with the coordinator's journal and metrics on a second tab.
 ///
 /// The interesting interaction: scroll to item 30, put the caret in the
-/// e-mail field, open the address sheet, then tap **Unfold**. With restore on,
-/// you land in two columns at item 30 with the field focused and the sheet
-/// still up. With restore off, the layout changes and all of that is gone.
+/// e-mail field, then tap **Unfold**. With restore on, you land in two
+/// columns at item 30 with the caret still in the field. With restore off,
+/// the layout changes and both are gone. Navigation and the sheet are
+/// separate claims, because in one column each of them covers the list (a
+/// pushed detail hides the e-mail row; a presented sheet takes first
+/// responder from it): open an order, tap Unfold, and the pushed detail
+/// becomes the sidebar selection; open the address sheet, tap Unfold through
+/// it, and the sheet is re-presented over the new layout.
 public struct PostureContinuityDemoView: View {
     @StateObject private var model: PostureContinuitySimulation
     @State private var scriptText: String
@@ -264,6 +269,9 @@ public struct PostureContinuityDemoView: View {
                 .toolbar { Button("Done") { model.sheetPresented = false } }
         }
         .presentationDetents([.medium])
+        // The posture controls sit above the sheet; without this a medium
+        // sheet blocks them and "open the sheet, then Unfold" is impossible.
+        .presentationBackgroundInteraction(.enabled(upThrough: .medium))
     }
 
     // MARK: Journal tab

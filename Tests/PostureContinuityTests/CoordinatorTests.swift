@@ -249,6 +249,21 @@ final class CoordinatorTests: XCTestCase {
         XCTAssertEqual(flows, [Fixtures.search])
     }
 
+    func testReRegisteredFlowStartsWithACleanRestoreHistory() async {
+        let coordinator = await Fixtures.coordinator()
+        await coordinator.ingest(PostureKeyword.compact.observation(at: 0))
+        await coordinator.ingest(PostureKeyword.transitioning.observation(at: 100))
+        await coordinator.ingest(PostureKeyword.expanded.observation(at: 400))
+        let first = await coordinator.acknowledgeRestore(Fixtures.checkout, generation: Generation(1))
+        XCTAssertEqual(first, .applied)
+        await coordinator.unregister(Fixtures.checkout)
+        await coordinator.register(Fixtures.checkoutDescriptor)
+        // No plan is outstanding for the re-registered flow, so this is
+        // `.noPlan` — not `.duplicate` from a history that should be gone.
+        let again = await coordinator.acknowledgeRestore(Fixtures.checkout, generation: Generation(1))
+        XCTAssertEqual(again, .rejected(.noPlan))
+    }
+
     func testPerFeaturePolicyMeansTwoFlowsDisagreeOnTheSamePosture() async {
         let registry = LayoutPolicyRegistry()
             .registering(AlwaysSingleColumnPolicy(), for: Fixtures.checkout)
@@ -267,7 +282,7 @@ final class CoordinatorTests: XCTestCase {
         await coordinator.checkpoint(Fixtures.checkoutSnapshot())
         let script = try PostureScript.parse(
             "transitioning@100,transitioning@140,compact@300,transitioning@400,expanded@700,transitioning@900,book@1200").get()
-        let outcomes = await coordinator.drive(ScriptedPostureReader(script: script))
+        let outcomes = await coordinator.driveCollecting(ScriptedPostureReader(script: script))
         XCTAssertEqual(outcomes.count, 7)
         let report = await coordinator.report()
         XCTAssertEqual(report.transitionsOpened, 3)
@@ -287,7 +302,7 @@ final class CoordinatorTests: XCTestCase {
             PostureKeyword.expanded.observation(at: 20)
         ]
         let coordinator = await Fixtures.coordinator()
-        let outcomes = await coordinator.drive(ReplayPostureReader(recorded))
+        let outcomes = await coordinator.driveCollecting(ReplayPostureReader(recorded))
         XCTAssertEqual(outcomes.count, 3)
         guard case .settle(.settled(let bundle)) = outcomes[2] else { return XCTFail("expected settled, got \(outcomes[2])") }
         XCTAssertEqual(bundle.posture.layoutClass, .expanded)

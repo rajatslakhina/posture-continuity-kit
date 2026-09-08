@@ -263,6 +263,14 @@ final class ScriptTests: XCTestCase {
         XCTAssertEqual(script.steps.last?.atMillis, Int64.max)
     }
 
+    func testPacedSleepSaturatesInsteadOfOverflowing() {
+        XCTAssertEqual(ScriptedPostureReader.nanoseconds(forMillis: 0), 0)
+        XCTAssertEqual(ScriptedPostureReader.nanoseconds(forMillis: 250), 250_000_000)
+        XCTAssertEqual(ScriptedPostureReader.nanoseconds(forMillis: -5), 0)
+        XCTAssertEqual(ScriptedPostureReader.nanoseconds(forMillis: Int64.max), UInt64.max)
+        XCTAssertEqual(ScriptedPostureReader.nanoseconds(forMillis: Int64(UInt64.max / 1_000_000) + 1), UInt64.max)
+    }
+
     func testLaunchArgumentsAbsentReturnsNil() {
         XCTAssertNil(PostureScript.fromLaunchArguments(["Demo"]))
         XCTAssertEqual(PostureScript.fromLaunchArguments(["Demo", "-posture-script"]), .failure(.empty))

@@ -63,7 +63,7 @@ recorded field session ───────────────────
 
 **Width-independent snapshot.** `ScrollAnchor` is an item identity plus a fraction into that item, never a pixel offset; `NavigationState` carries both the stack shape and the selection shape and `SnapshotProjector` converts between them losslessly (`[.list, .detail(x), .editor(x)]` ⇄ `selection: x, stack: [.editor(x)]`); focus is dropped, and *reported* dropped, when the field does not exist in the target mode according to the flow's `FlowDescriptor`.
 
-**Observability.** Every decision is a `PostureEvent` in a bounded `PostureJournal`. `ContinuityReport` turns the log into the numbers a lead would put on a launch dashboard: storms absorbed, degraded-restore rate, stale captures, superseded restores, longest transition. `ContinuityInvariants.validate` re-derives the ordering contract from the log alone, independently of the coordinator — the tests feed it deliberately broken logs and assert that it fails them.
+**Observability.** Every decision is a `PostureEvent` in a bounded `PostureJournal`. `ContinuityReport` turns the log into the numbers a lead would put on a launch dashboard: storms absorbed, degraded-restore rate, stale captures, superseded restores, longest transition. `ContinuityInvariants.validate` re-derives the ordering contract from the log alone, independently of the coordinator — the tests feed it deliberately broken logs and assert that it fails them. Because the journal is bounded, `validate(_:windowed:)` knows when it is looking at a suffix rather than a session and withholds the three judgements a dropped prefix could falsify (settle-without-open, capture-without-open, restore-without-plan) until it has seen enough of the window; ordering violations are always reported.
 
 **Agent-drivable.** `PostureScript.parse("compact,transitioning@200,expanded@600,transitioning@800,book@1200")` and `PostureScript.fromLaunchArguments(CommandLine.arguments)` let a headless harness (Xcode 27's `xcrun mcp-server`, a UI test, a CI job) push the app through any posture sequence deterministically and read the journal back. `ReplayPostureReader` replays a recorded field session exactly.
 
@@ -83,7 +83,7 @@ recorded field session ───────────────────
 | **Degradation is reported, never hidden.** Every plan carries `[Degradation]` and a `SnapshotProvenance`. | A restore from a stale checkpoint and a restore from a fresh capture look identical to the user until they don't. The field metric has to distinguish them. | Best-effort restore with no provenance. Undebuggable in the field. |
 | **Actor with no `await` in any method body.** Callers suspend; the coordinator computes. | A suspending actor method interleaves. `read → await → write` in `settle` would let a second fold plan against state the first had replaced. | `async` methods that await a clock or a delegate mid-computation. The classic actor-reentrancy bug. |
 | **Invariant checker independent of the coordinator.** `ContinuityInvariants.validate(events)` re-derives the contract from the journal. | A coordinator that validates its own output cannot catch its own bugs. The checker catches what the coordinator prevents, and the tests prove it by feeding it logs the coordinator would never write. | Trust the coordinator. |
-| **Every trapping operation guarded.** `Sanitize.saturatingInt`, clamps on every fraction and angle, `Int64.max` guards on the clock, saturating generation and storm counters, bounded journal, `Int.max`-derived ceilings. | A NaN hinge angle from a flaky sensor must not crash a checkout. | Trust the platform's numbers. |
+| **Every trapping operation guarded, every structure bounded.** `Sanitize.saturatingInt`, clamps on every fraction and angle, `Int64.max` guards on the clock, saturating generation and storm counters, saturating millisecond→nanosecond conversion in the paced reader, `Int.max`-derived ceilings; the journal is a ring, the applied-restore record is one generation per flow rather than a growing set. | A NaN hinge angle from a flaky sensor must not crash a checkout. | Trust the platform's numbers. |
 
 **Adjacent work, stated plainly.** Two earlier packages in this portfolio touch nearby ground: [`adaptive-layout-kit`](https://github.com/rajatslakhina/adaptive-layout-kit) (width breakpoints, a hinge-transition debouncer, a static-analysis scanner for fixed-layout risk) and [`display-class-planner-kit`](https://github.com/rajatslakhina/display-class-planner-kit) (re-planning *in-flight network work* across a display-class change, with hysteresis). Neither has a notion of user-state continuity: no capture/restore, no generation ordering of restores, no navigation projection, no focus validity, no per-feature policy, no journal-derived invariant checker. This package is the piece that was missing between "the layout adapted" and "the user did not lose anything."
 
@@ -143,7 +143,7 @@ A scripted harness for CI or an agent:
 
 ```swift
 let script = try PostureScript.parse("compact,transitioning@100,expanded@500,transitioning@700,book@1100").get()
-await coordinator.drive(ScriptedPostureReader(script: script))
+await coordinator.drive(ScriptedPostureReader(script: script))   // or driveCollecting(_:) for a finite script in a test
 ```
 
 ### Add to a project
@@ -163,13 +163,13 @@ swift build -Xswiftc -warnings-as-errors
 swift test
 ```
 
-The core target has no platform dependencies; the whole test suite runs on Linux. `PostureContinuityUI` compiles under `#if canImport(SwiftUI) && os(iOS)` and is built for real by the macOS CI job against `generic/platform=iOS Simulator`.
+The core target has no platform dependencies; the whole test suite runs on Linux. `PostureContinuityUI` is gated on `#if canImport(SwiftUI)` (the view additionally on `os(iOS)`) and is built for real by the macOS CI job against `generic/platform=iOS Simulator`.
 
 ### What the tests cover
 
-67 tests in four files. The ones worth reading:
+71 tests in three files (plus `Support.swift` fixtures). The ones worth reading:
 
-- `InvariantTests` — **negative controls.** Each test hands `ContinuityInvariants.validate` a log a *broken* coordinator would have produced (a restore applied after a newer generation settled, a duplicate restore, a capture accepted with no transition open, a nested open, a settle without an open, a restore without a plan) and asserts the checker fails it; `testCheckerCatchesWhatTheCoordinatorPrevents` runs the real coordinator, confirms it refused the superseded restore, then appends the event it refused and shows the checker catches it anyway.
+- `InvariantTests` — **negative controls.** `testWindowedLogSuppressesDroppedPrefixButNotRealViolations` and `testCoordinatorViolationsStayEmptyAfterTheJournalWraps` prove the windowed checker neither invents violations from a dropped prefix nor misses real ones after it. Each test hands `ContinuityInvariants.validate` a log a *broken* coordinator would have produced (a restore applied after a newer generation settled, a duplicate restore, a capture accepted with no transition open, a nested open, a settle without an open, a restore without a plan) and asserts the checker fails it; `testCheckerCatchesWhatTheCoordinatorPrevents` runs the real coordinator, confirms it refused the superseded restore, then appends the event it refused and shows the checker catches it anyway.
 - `ConcurrencyTests` — **real racing writers.** 64 tasks acknowledge the same plan (exactly one `.applied`, 63 `.duplicate`); 120 tasks capture with generations 0/1/2 against an open generation 1 (exactly 40 accepted, 80 rejected with the right reason, and the planned snapshot provably came from an accepted one); 200 checkpoints race a 40-transition replay.
 - `CoordinatorTests` — the contract: capture beats checkpoint; missed capture falls back and is counted; storm that reverts restores nothing and keeps the checkpoint; storm that ends elsewhere plans from the original captures with duration measured from the first begin; implicit transition is `.noCaptureWindow`, not `.captureMissed`; superseded / duplicate / no-plan / unknown-flow restores refused; projected snapshot becomes the checkpoint for an immediate second fold, but a flow with no state is not promoted to a phantom empty checkpoint.
 - `PrimitiveTests` — NaN/infinite geometry, swapped thresholds, the `Double(Int.max)` rounding trap, empty and mismatched scroll inputs, past-the-end offsets, the stack ⇄ split round trip, per-feature policy disagreement on the same posture, the script parser's every rejection path, journal ring behaviour.
@@ -180,10 +180,10 @@ The core target has no platform dependencies; the whole test suite runs on Linux
 
 *(Written against the real results after CI reported — see the Actions tab linked above.)*
 
-- **Local:** `rm -rf .build && swift build -Xswiftc -warnings-as-errors` → `Build complete!`, 0 warnings; `swift build --build-tests -Xswiftc -warnings-as-errors` → clean; `swift test` → **67 tests, 0 failures**, on Swift 6.0.3 (aarch64-unknown-linux-gnu).
+- **Local:** `rm -rf .build && swift build -Xswiftc -warnings-as-errors` → `Build complete!`, 0 warnings; `swift build --build-tests -Xswiftc -warnings-as-errors` → clean; `swift test` → **71 tests, 0 failures**, on Swift 6.0.3 (aarch64-unknown-linux-gnu).
 - **CI, Linux job:** clean build with warnings as errors, test build with warnings as errors, `swift test` — pending: filled in after the first CI run on `main`.
 - **CI, iOS job:** `xcodebuild build -scheme PostureContinuityUI -destination 'generic/platform=iOS Simulator'` on `macos-15` — pending: filled in after the first CI run on `main`.
-- **Ran on a Simulator:** pending — stated exactly (yes or no, with the reason) once the demo repo run has been attempted.
+- **Ran on a Simulator: no.** This package was produced by an unattended scheduled run in which computer-use access to Xcode and the Simulator was refused three times (`Computer-use access to "Xcode 26.3", "Simulator" can't be approved during a scheduled run`). The iOS CI job proves the SwiftUI module compiles for the Simulator; it does not prove the app launched. No screenshots exist, here or in the demo repo.
 
 ---
 
