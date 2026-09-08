@@ -4,7 +4,7 @@
 
 `PostureContinuity` is a Swift package that keeps in-flight user work — a checkout half-filled, a search three screens deep, a composer with the caret in a field — intact across display-posture transitions on foldable and resizable iPhones. It is a generation-ordered capture/restore state machine (`ContinuityCoordinator`), a per-feature layout policy layer (`FeatureLayoutPolicy`, hinge-aware), a width-independent snapshot model (`ScrollAnchor`, `NavigationState` that projects losslessly between stack and split shapes), a bounded observability journal with an independent invariant checker, and a scriptable posture source so an agent can drive the whole thing from a launch argument.
 
-Companion demo app: **(added after the companion repo is pushed — see below)**
+Companion demo app: **[posture-continuity-demo-app](https://github.com/rajatslakhina/posture-continuity-demo-app)** — a separate repository with a real `Demo.xcodeproj` that consumes this package as a remote Swift Package pinned `upToNextMajorVersion` from `1.0.1`.
 
 [![CI](https://github.com/rajatslakhina/posture-continuity-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/rajatslakhina/posture-continuity-kit/actions/workflows/ci.yml)
 
@@ -149,7 +149,7 @@ await coordinator.drive(ScriptedPostureReader(script: script))   // or driveColl
 ### Add to a project
 
 ```swift
-.package(url: "https://github.com/rajatslakhina/posture-continuity-kit.git", from: "1.0.0")
+.package(url: "https://github.com/rajatslakhina/posture-continuity-kit.git", from: "1.0.1")
 ```
 
 Products: `PostureContinuity` (core, platform-agnostic, builds and tests on Linux) and `PostureContinuityUI` (SwiftUI demo view, iOS 17+).
@@ -181,8 +181,9 @@ The core target has no platform dependencies; the whole test suite runs on Linux
 *(Written against the real results after CI reported — see the Actions tab linked above.)*
 
 - **Local:** `rm -rf .build && swift build -Xswiftc -warnings-as-errors` → `Build complete!`, 0 warnings; `swift build --build-tests -Xswiftc -warnings-as-errors` → clean; `swift test` → **71 tests, 0 failures**, on Swift 6.0.3 (aarch64-unknown-linux-gnu).
-- **CI, Linux job:** clean build with warnings as errors, test build with warnings as errors, `swift test` — pending: filled in after the first CI run on `main`.
-- **CI, iOS job:** `xcodebuild build -scheme PostureContinuityUI -destination 'generic/platform=iOS Simulator'` on `macos-15` — pending: filled in after the first CI run on `main`.
+- **CI, Linux job** (`ubuntu-latest`, `swift:6.0` container): `swift build -Xswiftc -warnings-as-errors`, `swift build --build-tests -Xswiftc -warnings-as-errors`, `swift test` — **passed** on every commit to `main` so far, including the `v1.0.0` (`f8d0dea`) and `v1.0.1` (`c5395ba`) tags. See the [Actions tab](https://github.com/rajatslakhina/posture-continuity-kit/actions/workflows/ci.yml).
+- **CI, iOS job** (`macos-15`): `xcodebuild build -scheme PostureContinuityUI -destination 'generic/platform=iOS Simulator'` — **passed** on the same commits. This is the only place the SwiftUI module is compiled; it proves it compiles for the Simulator, nothing more.
+- **Independent review:** three rounds by a reviewer with no memory of building the code, before the demo repo was pushed. Round 1 found four real defects (a sheet that blocked the posture controls, a reachable `UInt64` overflow in the paced reader, an unbounded applied-restore set, false invariant violations after the journal wrapped); round 2 found one (`drive(_:)` accumulated outcomes forever on a live reader); round 3 found one (a doc claim that focus and a presented sheet could be restored simultaneously). All are fixed in `v1.0.1`. The round-3 fix was not independently re-reviewed.
 - **Ran on a Simulator: no.** This package was produced by an unattended scheduled run in which computer-use access to Xcode and the Simulator was refused three times (`Computer-use access to "Xcode 26.3", "Simulator" can't be approved during a scheduled run`). The iOS CI job proves the SwiftUI module compiles for the Simulator; it does not prove the app launched. No screenshots exist, here or in the demo repo.
 
 ---
